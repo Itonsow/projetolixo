@@ -85,7 +85,11 @@ bool iniciarCamera() {
 
 // ===== CAPTURA E ENVIO DA FOTO =====
 void tirarEEnviarFoto() {
-  // Acende flash 200ms para iluminar
+  // Descarta frame em buffer (foto antiga que ficou na fila do sensor)
+  camera_fb_t* fb_descarte = esp_camera_fb_get();
+  if (fb_descarte) esp_camera_fb_return(fb_descarte);
+
+  // Acende flash 200ms para iluminar e captura frame fresco
   digitalWrite(LED_BUILTIN_PIN, HIGH);
   delay(200);
 
