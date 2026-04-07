@@ -8,12 +8,12 @@
 #include <HTTPClient.h>
 
 // ===== CONFIGURAÇÃO WiFi =====
-const char* ssid     = "SEU_WIFI";
-const char* password = "SUA_SENHA";
+const char* ssid     = "Iensen";
+const char* password = "itonfo123";
 
 // ===== IP DO COMPUTADOR NA REDE =====
 // Execute servidor_fotos.py no PC e coloque o IP que ele exibir aqui
-const char* servidorIP = "http://192.168.1.100:5000/foto";
+const char* servidorIP = "http://10.174.28.57:5000/foto";
 
 // ===== PINOS =====
 #define TRIG_PIN        14
