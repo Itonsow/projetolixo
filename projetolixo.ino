@@ -1,5 +1,5 @@
-// ESP32-CAM + HC-SR04 + Servo MG995 no IO13
-// Aciona o servo quando distância <= 20 cm
+// ESP32-CAM + HC-SR04 + 2x Servo MG995 (pan/tilt) nos IO13 e IO12
+// Aciona os servos quando distância <= 20 cm
 // Ao detectar: sensor inativo por 3s, tira foto e envia via HTTP POST ao PC
 
 #include <ESP32Servo.h>
@@ -8,17 +8,18 @@
 #include <HTTPClient.h>
 
 // ===== CONFIGURAÇÃO WiFi =====
-const char* ssid     = "SEU_WIFI";
-const char* password = "SUA_SENHA";
+const char* ssid     = "Ximenes";
+const char* password = "ximenes1234";
 
 // ===== IP DO COMPUTADOR NA REDE =====
 // Execute servidor_fotos.py no PC e coloque o IP que ele exibir aqui
-const char* servidorIP = "http://192.168.1.100:5000/foto";
+const char* servidorIP = "http://10.63.76.57:5000/foto";
 
 // ===== PINOS =====
 #define TRIG_PIN        14
 #define ECHO_PIN        15
-#define SERVO_PIN       13
+#define SERVO_PAN_PIN   13   // Servo horizontal (pan)
+#define SERVO_TILT_PIN  2   // Servo vertical (tilt)
 #define LED_BUILTIN_PIN  4   // Flash LED (ativo em HIGH)
 
 // ===== PARÂMETROS =====
@@ -26,8 +27,22 @@ const char* servidorIP = "http://192.168.1.100:5000/foto";
 #define INTERVALO_PISCA 10000   // ms
 #define TEMPO_PAUSA      3000   // ms que o sensor fica inativo após detecção
 
-#define SERVO_ABERTO    0
-#define SERVO_FECHADO  90
+// Posições iniciais (repouso) dos servos
+#define SERVO_PAN_INICIAL   0
+#define SERVO_TILT_INICIAL  91
+
+// Movimento sequencial ao detectar objeto
+/*
+* Papel->  x = 0, y = 0
+* Plastico->  x = 0, y = 180
+* Metal->  x = 90, y = 180
+* Bio->  x = 90, y = 0
+*/
+#define SERVO_PAN_ALVO_X        120   // posição X do horizontal
+#define SERVO_TILT_FRENTE       150   // posição para "frente" do vertical
+#define SERVO_PASSO_GRAUS        1   // passo angular por atualização
+#define SERVO_DELAY_PASSO_MS     8   // velocidade de movimento (8ms = moderado)
+#define TEMPO_PAUSA_VERTICAL_MS 250  // pausa curta no topo do movimento vertical
 
 // ===== CÂMERA - Pinout AI-Thinker ESP32-CAM =====
 #define CAM_PIN_PWDN    32
@@ -47,7 +62,10 @@ const char* servidorIP = "http://192.168.1.100:5000/foto";
 #define CAM_PIN_HREF    23
 #define CAM_PIN_PCLK    22
 
-Servo servo;
+Servo servoPan;
+Servo servoTilt;
+int posPanAtual  = SERVO_PAN_INICIAL;
+int posTiltAtual = SERVO_TILT_INICIAL;
 
 unsigned long ultimoPisca     = 0;
 unsigned long tempoDesativacao = 0;
@@ -139,6 +157,38 @@ void piscarBuiltin() {
   digitalWrite(LED_BUILTIN_PIN, LOW);
 }
 
+void moverServoSuave(Servo& servo, int& posAtual, int posDestino) {
+  posDestino = constrain(posDestino, 0, 180);
+  if (posAtual == posDestino) return;
+
+  int direcao = (posDestino > posAtual) ? SERVO_PASSO_GRAUS : -SERVO_PASSO_GRAUS;
+  while (posAtual != posDestino) {
+    posAtual += direcao;
+    if ((direcao > 0 && posAtual > posDestino) || (direcao < 0 && posAtual < posDestino)) {
+      posAtual = posDestino;
+    }
+    servo.write(posAtual);
+    delay(SERVO_DELAY_PASSO_MS);
+  }
+}
+
+void executarSequenciaServos() {
+  Serial.println("[SERVO] 1) Horizontal movendo para X...");
+  moverServoSuave(servoPan, posPanAtual, SERVO_PAN_ALVO_X);
+
+  Serial.println("[SERVO] 2) Vertical movendo para frente...");
+  moverServoSuave(servoTilt, posTiltAtual, SERVO_TILT_FRENTE);
+
+  Serial.println("[SERVO] 3) Pausa curta do vertical.");
+  delay(TEMPO_PAUSA_VERTICAL_MS);
+
+  Serial.println("[SERVO] 4) Vertical voltando para posição inicial.");
+  moverServoSuave(servoTilt, posTiltAtual, SERVO_TILT_INICIAL);
+
+  Serial.println("[SERVO] 5) Horizontal voltando para posição inicial.");
+  moverServoSuave(servoPan, posPanAtual, SERVO_PAN_INICIAL);
+}
+
 // ===== SETUP =====
 void setup() {
   Serial.begin(115200);
@@ -147,8 +197,20 @@ void setup() {
   pinMode(LED_BUILTIN_PIN, OUTPUT);
   digitalWrite(LED_BUILTIN_PIN, LOW);
 
-  servo.attach(SERVO_PIN);
-  servo.write(SERVO_FECHADO);
+  // 👇 Reserva timers 1 e 2 para os servos (timer 0 fica para a câmera)
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+
+  servoPan.setPeriodHertz(50);             // PWM padrão para servo (50 Hz)
+  servoTilt.setPeriodHertz(50);
+
+  servoPan.attach(SERVO_PAN_PIN, 500, 2500);   // pulso mín/máx em µs
+  servoTilt.attach(SERVO_TILT_PIN, 500, 2500);
+
+  servoPan.write(SERVO_PAN_INICIAL);
+  servoTilt.write(SERVO_TILT_INICIAL);
+  posPanAtual  = SERVO_PAN_INICIAL;
+  posTiltAtual = SERVO_TILT_INICIAL;
 
   if (iniciarCamera()) {
     Serial.println("[CÂMERA] Inicializada com sucesso.");
@@ -181,7 +243,6 @@ void loop() {
     if (agora - tempoDesativacao >= TEMPO_PAUSA) {
       sensorAtivo = true;
       Serial.println("[SENSOR] Reativado.");
-      servo.write(SERVO_FECHADO);
     }
     delay(10);
     return;
@@ -194,8 +255,8 @@ void loop() {
     Serial.printf("[SENSOR] Distância: %ld cm\n", distancia);
 
     if (distancia <= DISTANCIA_CM) {
-      Serial.println("[SENSOR] Objeto detectado! Abrindo servo...");
-      servo.write(SERVO_ABERTO);
+      Serial.println("[SENSOR] Objeto detectado! Executando sequência dos servos...");
+      executarSequenciaServos();
 
       // Desativa sensor e registra o momento
       sensorAtivo      = false;
@@ -206,7 +267,6 @@ void loop() {
     }
   } else {
     Serial.println("[SENSOR] Sem leitura (fora de alcance).");
-    servo.write(SERVO_FECHADO);
   }
 
   delay(100);
