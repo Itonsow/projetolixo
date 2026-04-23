@@ -1,273 +1,237 @@
-// ESP32-CAM + HC-SR04 + 2x Servo MG995 (pan/tilt) nos IO13 e IO12
-// Aciona os servos quando distância <= 20 cm
-// Ao detectar: sensor inativo por 3s, tira foto e envia via HTTP POST ao PC
-
-#include <ESP32Servo.h>
-#include "esp_camera.h"
-#include <WiFi.h>
-#include <HTTPClient.h>
-
-// ===== CONFIGURAÇÃO WiFi =====
-const char* ssid     = "Ximenes";
-const char* password = "ximenes1234";
-
-// ===== IP DO COMPUTADOR NA REDE =====
-// Execute servidor_fotos.py no PC e coloque o IP que ele exibir aqui
-const char* servidorIP = "http://10.63.76.57:5000/foto";
-
-// ===== PINOS =====
-#define TRIG_PIN        14
-#define ECHO_PIN        15
-#define SERVO_PAN_PIN   13   // Servo horizontal (pan)
-#define SERVO_TILT_PIN  2   // Servo vertical (tilt)
-#define LED_BUILTIN_PIN  4   // Flash LED (ativo em HIGH)
-
-// ===== PARÂMETROS =====
-#define DISTANCIA_CM       20
-#define INTERVALO_PISCA 10000   // ms
-#define TEMPO_PAUSA      3000   // ms que o sensor fica inativo após detecção
-
-// Posições iniciais (repouso) dos servos
-#define SERVO_PAN_INICIAL   0
-#define SERVO_TILT_INICIAL  91
-
-// Movimento sequencial ao detectar objeto
 /*
-* Papel->  x = 0, y = 0
-* Plastico->  x = 0, y = 180
-* Metal->  x = 90, y = 180
-* Bio->  x = 90, y = 0
+  ESP32-CAM + HC-SR04
+
+  Funcionamento:
+  1. Conecta o ESP32-CAM ao Wi-Fi.
+  2. Mede a distancia usando o HC-SR04.
+  3. Quando a distancia fica abaixo de 10 cm, tira uma foto.
+  4. Envia a foto por HTTP POST para o servidor Python no computador.
+
+  Ligacoes do HC-SR04:
+  - TRIG -> GPIO 14
+  - ECHO -> GPIO 15, passando por divisor de tensao/level shifter para 3.3V
+  - VCC  -> 5V externo
+  - GND  -> GND da fonte externa e GND do ESP32-CAM em comum
 */
-#define SERVO_PAN_ALVO_X        120   // posição X do horizontal
-#define SERVO_TILT_FRENTE       150   // posição para "frente" do vertical
-#define SERVO_PASSO_GRAUS        1   // passo angular por atualização
-#define SERVO_DELAY_PASSO_MS     8   // velocidade de movimento (8ms = moderado)
-#define TEMPO_PAUSA_VERTICAL_MS 250  // pausa curta no topo do movimento vertical
 
-// ===== CÂMERA - Pinout AI-Thinker ESP32-CAM =====
-#define CAM_PIN_PWDN    32
-#define CAM_PIN_RESET   -1
-#define CAM_PIN_XCLK     0
-#define CAM_PIN_SIOD    26
-#define CAM_PIN_SIOC    27
-#define CAM_PIN_D7      35
-#define CAM_PIN_D6      34
-#define CAM_PIN_D5      39
-#define CAM_PIN_D4      36
-#define CAM_PIN_D3      21
-#define CAM_PIN_D2      19
-#define CAM_PIN_D1      18
-#define CAM_PIN_D0       5
-#define CAM_PIN_VSYNC   25
-#define CAM_PIN_HREF    23
-#define CAM_PIN_PCLK    22
+#include "esp_camera.h"
+#include <HTTPClient.h>
+#include <WiFi.h>
 
-Servo servoPan;
-Servo servoTilt;
-int posPanAtual  = SERVO_PAN_INICIAL;
-int posTiltAtual = SERVO_TILT_INICIAL;
+// ===== Wi-Fi =====
+const char* WIFI_SSID = "Ximenes";
+const char* WIFI_PASSWORD = "ximenes1234";
 
-unsigned long ultimoPisca     = 0;
-unsigned long tempoDesativacao = 0;
-bool sensorAtivo              = true;
+// Rode o servidor_fotos.py no computador e copie a URL exibida aqui.
+// Exemplo: http://192.168.0.25:5000/foto
+const char* SERVIDOR_FOTOS_URL = "http://172.16.225.61:5000/foto";
 
-// ===== INICIALIZAÇÃO DA CÂMERA =====
+// ===== Sensor ultrassonico =====
+#define TRIG_PIN 14
+#define ECHO_PIN 15
+#define DISTANCIA_GATILHO_CM 10.0f
+#define TIMEOUT_ECHO_US 30000UL
+
+// ===== Camera / flash =====
+#define FLASH_LED_PIN 4
+#define TEMPO_FLASH_MS 180
+
+// Evita tirar varias fotos seguidas do mesmo objeto parado.
+#define INTERVALO_MINIMO_FOTOS_MS 5000UL
+
+// ===== Pinout AI-Thinker ESP32-CAM =====
+#define CAM_PIN_PWDN 32
+#define CAM_PIN_RESET -1
+#define CAM_PIN_XCLK 0
+#define CAM_PIN_SIOD 26
+#define CAM_PIN_SIOC 27
+#define CAM_PIN_D7 35
+#define CAM_PIN_D6 34
+#define CAM_PIN_D5 39
+#define CAM_PIN_D4 36
+#define CAM_PIN_D3 21
+#define CAM_PIN_D2 19
+#define CAM_PIN_D1 18
+#define CAM_PIN_D0 5
+#define CAM_PIN_VSYNC 25
+#define CAM_PIN_HREF 23
+#define CAM_PIN_PCLK 22
+
+unsigned long ultimaFotoMs = 0;
+
 bool iniciarCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer   = LEDC_TIMER_0;
-  config.pin_d0       = CAM_PIN_D0;
-  config.pin_d1       = CAM_PIN_D1;
-  config.pin_d2       = CAM_PIN_D2;
-  config.pin_d3       = CAM_PIN_D3;
-  config.pin_d4       = CAM_PIN_D4;
-  config.pin_d5       = CAM_PIN_D5;
-  config.pin_d6       = CAM_PIN_D6;
-  config.pin_d7       = CAM_PIN_D7;
-  config.pin_xclk     = CAM_PIN_XCLK;
-  config.pin_pclk     = CAM_PIN_PCLK;
-  config.pin_vsync    = CAM_PIN_VSYNC;
-  config.pin_href     = CAM_PIN_HREF;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = CAM_PIN_D0;
+  config.pin_d1 = CAM_PIN_D1;
+  config.pin_d2 = CAM_PIN_D2;
+  config.pin_d3 = CAM_PIN_D3;
+  config.pin_d4 = CAM_PIN_D4;
+  config.pin_d5 = CAM_PIN_D5;
+  config.pin_d6 = CAM_PIN_D6;
+  config.pin_d7 = CAM_PIN_D7;
+  config.pin_xclk = CAM_PIN_XCLK;
+  config.pin_pclk = CAM_PIN_PCLK;
+  config.pin_vsync = CAM_PIN_VSYNC;
+  config.pin_href = CAM_PIN_HREF;
   config.pin_sccb_sda = CAM_PIN_SIOD;
   config.pin_sccb_scl = CAM_PIN_SIOC;
-  config.pin_pwdn     = CAM_PIN_PWDN;
-  config.pin_reset    = CAM_PIN_RESET;
+  config.pin_pwdn = CAM_PIN_PWDN;
+  config.pin_reset = CAM_PIN_RESET;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size   = FRAMESIZE_VGA;   // 640x480
-  config.jpeg_quality = 12;
-  config.fb_count     = 1;
 
-  return esp_camera_init(&config) == ESP_OK;
+  if (psramFound()) {
+    config.frame_size = FRAMESIZE_VGA;  // 640x480
+    config.jpeg_quality = 12;
+    config.fb_count = 2;
+  } else {
+    config.frame_size = FRAMESIZE_QVGA; // 320x240
+    config.jpeg_quality = 14;
+    config.fb_count = 1;
+  }
+
+  esp_err_t erro = esp_camera_init(&config);
+  if (erro != ESP_OK) {
+    Serial.printf("[CAMERA] Falha ao iniciar. Erro: 0x%x\n", erro);
+    return false;
+  }
+
+  Serial.println("[CAMERA] Inicializada.");
+  return true;
 }
 
-// ===== CAPTURA E ENVIO DA FOTO =====
-void tirarEEnviarFoto() {
-  // Descarta frame em buffer (foto antiga que ficou na fila do sensor)
-  camera_fb_t* fb_descarte = esp_camera_fb_get();
-  if (fb_descarte) esp_camera_fb_return(fb_descarte);
-
-  // Acende flash 200ms para iluminar e captura frame fresco
-  digitalWrite(LED_BUILTIN_PIN, HIGH);
-  delay(200);
-
-  camera_fb_t* fb = esp_camera_fb_get();
-
-  digitalWrite(LED_BUILTIN_PIN, LOW);
-
-  if (!fb) {
-    Serial.println("[CÂMERA] Falha ao capturar foto.");
+void conectarWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
     return;
   }
 
-  Serial.printf("[CÂMERA] Foto capturada: %u bytes. Enviando...\n", fb->len);
+  Serial.printf("[WIFI] Conectando em %s", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  HTTPClient http;
-  http.begin(servidorIP);
-  http.addHeader("Content-Type", "image/jpeg");
-
-  int httpCode = http.POST(fb->buf, fb->len);
-
-  if (httpCode == 200) {
-    Serial.println("[HTTP] Foto enviada e salva com sucesso!");
-  } else {
-    Serial.printf("[HTTP] Falha no envio. Código: %d\n", httpCode);
-  }
-
-  http.end();
-  esp_camera_fb_return(fb);
-}
-
-// ===== SENSOR ULTRASSÔNICO =====
-long medirDistanciaCm() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  long duracao = pulseIn(ECHO_PIN, HIGH, 30000);
-  if (duracao == 0) return -1;
-  return duracao * 0.0343 / 2;
-}
-
-void piscarBuiltin() {
-  digitalWrite(LED_BUILTIN_PIN, HIGH);
-  delay(100);
-  digitalWrite(LED_BUILTIN_PIN, LOW);
-}
-
-void moverServoSuave(Servo& servo, int& posAtual, int posDestino) {
-  posDestino = constrain(posDestino, 0, 180);
-  if (posAtual == posDestino) return;
-
-  int direcao = (posDestino > posAtual) ? SERVO_PASSO_GRAUS : -SERVO_PASSO_GRAUS;
-  while (posAtual != posDestino) {
-    posAtual += direcao;
-    if ((direcao > 0 && posAtual > posDestino) || (direcao < 0 && posAtual < posDestino)) {
-      posAtual = posDestino;
-    }
-    servo.write(posAtual);
-    delay(SERVO_DELAY_PASSO_MS);
-  }
-}
-
-void executarSequenciaServos() {
-  Serial.println("[SERVO] 1) Horizontal movendo para X...");
-  moverServoSuave(servoPan, posPanAtual, SERVO_PAN_ALVO_X);
-
-  Serial.println("[SERVO] 2) Vertical movendo para frente...");
-  moverServoSuave(servoTilt, posTiltAtual, SERVO_TILT_FRENTE);
-
-  Serial.println("[SERVO] 3) Pausa curta do vertical.");
-  delay(TEMPO_PAUSA_VERTICAL_MS);
-
-  Serial.println("[SERVO] 4) Vertical voltando para posição inicial.");
-  moverServoSuave(servoTilt, posTiltAtual, SERVO_TILT_INICIAL);
-
-  Serial.println("[SERVO] 5) Horizontal voltando para posição inicial.");
-  moverServoSuave(servoPan, posPanAtual, SERVO_PAN_INICIAL);
-}
-
-// ===== SETUP =====
-void setup() {
-  Serial.begin(115200);
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  pinMode(LED_BUILTIN_PIN, OUTPUT);
-  digitalWrite(LED_BUILTIN_PIN, LOW);
-
-  // 👇 Reserva timers 1 e 2 para os servos (timer 0 fica para a câmera)
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-
-  servoPan.setPeriodHertz(50);             // PWM padrão para servo (50 Hz)
-  servoTilt.setPeriodHertz(50);
-
-  servoPan.attach(SERVO_PAN_PIN, 500, 2500);   // pulso mín/máx em µs
-  servoTilt.attach(SERVO_TILT_PIN, 500, 2500);
-
-  servoPan.write(SERVO_PAN_INICIAL);
-  servoTilt.write(SERVO_TILT_INICIAL);
-  posPanAtual  = SERVO_PAN_INICIAL;
-  posTiltAtual = SERVO_TILT_INICIAL;
-
-  if (iniciarCamera()) {
-    Serial.println("[CÂMERA] Inicializada com sucesso.");
-  } else {
-    Serial.println("[CÂMERA] ERRO ao inicializar.");
-  }
-
-  Serial.printf("[WiFi] Conectando a %s...\n", ssid);
-  WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.printf("\n[WiFi] Conectado! IP do ESP: %s\n", WiFi.localIP().toString().c_str());
-  Serial.printf("[HTTP] Fotos serão enviadas para: %s\n", servidorIP);
+
+  Serial.println();
+  Serial.printf("[WIFI] Conectado. IP do ESP32-CAM: %s\n", WiFi.localIP().toString().c_str());
 }
 
-// ===== LOOP =====
-void loop() {
-  unsigned long agora = millis();
+float medirDistanciaCm() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
 
-  // Pisca LED a cada 10 segundos (heartbeat)
-  if (agora - ultimoPisca >= INTERVALO_PISCA) {
-    ultimoPisca = agora;
-    piscarBuiltin();
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long duracao = pulseIn(ECHO_PIN, HIGH, TIMEOUT_ECHO_US);
+  if (duracao == 0) {
+    return -1.0f;
   }
 
-  if (!sensorAtivo) {
-    // Aguarda fim da pausa de 3 segundos
-    if (agora - tempoDesativacao >= TEMPO_PAUSA) {
-      sensorAtivo = true;
-      Serial.println("[SENSOR] Reativado.");
-    }
-    delay(10);
+  // Velocidade aproximada do som: 0,0343 cm/us.
+  return (duracao * 0.0343f) / 2.0f;
+}
+
+camera_fb_t* capturarFoto() {
+  // Descarta um frame antigo, se existir, para reduzir chance de enviar foto atrasada.
+  camera_fb_t* descarte = esp_camera_fb_get();
+  if (descarte) {
+    esp_camera_fb_return(descarte);
+  }
+
+  digitalWrite(FLASH_LED_PIN, HIGH);
+  delay(TEMPO_FLASH_MS);
+
+  camera_fb_t* foto = esp_camera_fb_get();
+
+  digitalWrite(FLASH_LED_PIN, LOW);
+
+  if (!foto) {
+    Serial.println("[CAMERA] Nao foi possivel capturar a foto.");
+  }
+
+  return foto;
+}
+
+bool enviarFoto(camera_fb_t* foto) {
+  if (!foto) {
+    return false;
+  }
+
+  conectarWiFi();
+
+  HTTPClient http;
+  http.begin(SERVIDOR_FOTOS_URL);
+  http.addHeader("Content-Type", "image/jpeg");
+  http.setTimeout(10000);
+
+  Serial.printf("[HTTP] Enviando foto com %u bytes...\n", (unsigned int)foto->len);
+  int codigoHttp = http.POST(foto->buf, foto->len);
+  String resposta = http.getString();
+  http.end();
+
+  if (codigoHttp == 200) {
+    Serial.printf("[HTTP] Foto salva pelo servidor: %s\n", resposta.c_str());
+    return true;
+  }
+
+  Serial.printf("[HTTP] Falha no envio. Codigo: %d Resposta: %s\n", codigoHttp, resposta.c_str());
+  return false;
+}
+
+void tirarEEnviarFoto() {
+  camera_fb_t* foto = capturarFoto();
+  bool enviada = enviarFoto(foto);
+
+  if (foto) {
+    esp_camera_fb_return(foto);
+  }
+
+  if (enviada) {
+    ultimaFotoMs = millis();
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(FLASH_LED_PIN, OUTPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  digitalWrite(FLASH_LED_PIN, LOW);
+
+  iniciarCamera();
+  conectarWiFi();
+
+  Serial.printf("[HTTP] Servidor de fotos: %s\n", SERVIDOR_FOTOS_URL);
+  Serial.printf("[SENSOR] Disparo configurado para distancia menor que %.1f cm.\n", DISTANCIA_GATILHO_CM);
+}
+
+void loop() {
+  float distancia = medirDistanciaCm();
+
+  if (distancia < 0) {
+    Serial.println("[SENSOR] Sem leitura.");
+    delay(250);
     return;
   }
 
-  // Leitura do sensor
-  long distancia = medirDistanciaCm();
+  Serial.printf("[SENSOR] Distancia: %.1f cm\n", distancia);
 
-  if (distancia > 0) {
-    Serial.printf("[SENSOR] Distância: %ld cm\n", distancia);
+  bool perto = distancia < DISTANCIA_GATILHO_CM;
+  bool intervaloOk = millis() - ultimaFotoMs >= INTERVALO_MINIMO_FOTOS_MS;
 
-    if (distancia <= DISTANCIA_CM) {
-      Serial.println("[SENSOR] Objeto detectado! Executando sequência dos servos...");
-      executarSequenciaServos();
-
-      // Desativa sensor e registra o momento
-      sensorAtivo      = false;
-      tempoDesativacao = millis();
-
-      // Tira e envia a foto durante os 3 segundos de pausa
-      tirarEEnviarFoto();
-    }
-  } else {
-    Serial.println("[SENSOR] Sem leitura (fora de alcance).");
+  if (perto && intervaloOk) {
+    Serial.println("[SENSOR] Objeto detectado abaixo de 10 cm. Capturando foto...");
+    tirarEEnviarFoto();
   }
 
-  delay(100);
+  delay(250);
 }
