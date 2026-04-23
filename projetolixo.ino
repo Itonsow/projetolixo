@@ -6,6 +6,8 @@
   2. Mede a distancia usando o HC-SR04.
   3. Quando a distancia fica abaixo de 10 cm, tira uma foto.
   4. Envia a foto por HTTP POST para o servidor Python no computador.
+  5. Aguarda a classificacao do YOLO por ate 15 segundos.
+  6. Move os servos pan/tilt conforme a categoria detectada.
 
   Ligacoes do HC-SR04:
   - TRIG -> GPIO 14
@@ -15,6 +17,7 @@
 */
 
 #include "esp_camera.h"
+#include <ESP32Servo.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
 
@@ -32,6 +35,30 @@ const char* SERVIDOR_FOTOS_URL = "http://10.168.138.57:5000/foto";
 #define DISTANCIA_GATILHO_CM 10.0f
 #define TIMEOUT_ECHO_US 30000UL
 
+// ===== Servos MG996R =====
+#define SERVO_HORIZONTAL_PIN 13
+#define SERVO_VERTICAL_PIN 2
+
+// Preencha estes valores conforme a mecanica do seu projeto.
+#define SERVO_HORIZONTAL_INICIAL 90
+#define SERVO_VERTICAL_INICIAL 90
+
+#define ANGULO_X_PLASTICO 90
+#define ANGULO_Y_PLASTICO 90
+
+#define ANGULO_X_METAL 90
+#define ANGULO_Y_METAL 90
+
+#define ANGULO_X_PAPEL 90
+#define ANGULO_Y_PAPEL 90
+
+#define ANGULO_X_BIOLOGICO 90
+#define ANGULO_Y_BIOLOGICO 90
+
+#define SERVO_PASSO_GRAUS 1
+#define SERVO_DELAY_PASSO_MS 10
+#define SERVO_PAUSA_DESCARTE_MS 1000
+
 // ===== Camera / flash =====
 #define FLASH_LED_PIN 4
 #define TEMPO_FLASH_MS 180
@@ -41,6 +68,7 @@ const char* SERVIDOR_FOTOS_URL = "http://10.168.138.57:5000/foto";
 
 // Evita tirar varias fotos seguidas do mesmo objeto parado.
 #define INTERVALO_MINIMO_FOTOS_MS 5000UL
+#define TIMEOUT_RESPOSTA_SERVIDOR_MS 15000
 
 // ===== Pinout AI-Thinker ESP32-CAM =====
 #define CAM_PIN_PWDN 32
@@ -61,6 +89,116 @@ const char* SERVIDOR_FOTOS_URL = "http://10.168.138.57:5000/foto";
 #define CAM_PIN_PCLK 22
 
 unsigned long ultimaFotoMs = 0;
+Servo servoHorizontal;
+Servo servoVertical;
+int posHorizontalAtual = SERVO_HORIZONTAL_INICIAL;
+int posVerticalAtual = SERVO_VERTICAL_INICIAL;
+
+String normalizarClasse(String classe) {
+  classe.trim();
+  classe.toLowerCase();
+  return classe;
+}
+
+void moverServoSuave(Servo& servo, int& posAtual, int posDestino) {
+  posDestino = constrain(posDestino, 0, 180);
+
+  while (posAtual != posDestino) {
+    if (posAtual < posDestino) {
+      posAtual += SERVO_PASSO_GRAUS;
+      if (posAtual > posDestino) {
+        posAtual = posDestino;
+      }
+    } else {
+      posAtual -= SERVO_PASSO_GRAUS;
+      if (posAtual < posDestino) {
+        posAtual = posDestino;
+      }
+    }
+
+    servo.write(posAtual);
+    delay(SERVO_DELAY_PASSO_MS);
+  }
+}
+
+bool angulosParaClasse(String classe, int& anguloX, int& anguloY) {
+  classe = normalizarClasse(classe);
+
+  if (classe == "plastico") {
+    anguloX = ANGULO_X_PLASTICO;
+    anguloY = ANGULO_Y_PLASTICO;
+    return true;
+  }
+
+  if (classe == "metal") {
+    anguloX = ANGULO_X_METAL;
+    anguloY = ANGULO_Y_METAL;
+    return true;
+  }
+
+  if (classe == "papel") {
+    anguloX = ANGULO_X_PAPEL;
+    anguloY = ANGULO_Y_PAPEL;
+    return true;
+  }
+
+  if (classe == "biologico") {
+    anguloX = ANGULO_X_BIOLOGICO;
+    anguloY = ANGULO_Y_BIOLOGICO;
+    return true;
+  }
+
+  return false;
+}
+
+void executarMovimentoDescarte(int anguloX, int anguloY) {
+  Serial.printf("[SERVO] Horizontal indo para X=%d\n", anguloX);
+  moverServoSuave(servoHorizontal, posHorizontalAtual, anguloX);
+
+  Serial.printf("[SERVO] Vertical indo para Y=%d\n", anguloY);
+  moverServoSuave(servoVertical, posVerticalAtual, anguloY);
+
+  Serial.printf("[SERVO] Pausa de %d ms.\n", SERVO_PAUSA_DESCARTE_MS);
+  delay(SERVO_PAUSA_DESCARTE_MS);
+
+  Serial.println("[SERVO] Vertical voltando para a posicao inicial.");
+  moverServoSuave(servoVertical, posVerticalAtual, SERVO_VERTICAL_INICIAL);
+
+  Serial.println("[SERVO] Horizontal voltando para a posicao inicial.");
+  moverServoSuave(servoHorizontal, posHorizontalAtual, SERVO_HORIZONTAL_INICIAL);
+}
+
+void moverConformeClasse(String classe) {
+  int anguloX = SERVO_HORIZONTAL_INICIAL;
+  int anguloY = SERVO_VERTICAL_INICIAL;
+
+  if (!angulosParaClasse(classe, anguloX, anguloY)) {
+    Serial.printf("[SERVO] Classe sem movimento configurado: %s\n", classe.c_str());
+    return;
+  }
+
+  Serial.printf("[SERVO] Classe %s -> X=%d Y=%d\n", classe.c_str(), anguloX, anguloY);
+  executarMovimentoDescarte(anguloX, anguloY);
+}
+
+void iniciarServos() {
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+
+  servoHorizontal.setPeriodHertz(50);
+  servoVertical.setPeriodHertz(50);
+
+  servoHorizontal.attach(SERVO_HORIZONTAL_PIN, 500, 2500);
+  servoVertical.attach(SERVO_VERTICAL_PIN, 500, 2500);
+
+  servoHorizontal.write(SERVO_HORIZONTAL_INICIAL);
+  servoVertical.write(SERVO_VERTICAL_INICIAL);
+
+  posHorizontalAtual = SERVO_HORIZONTAL_INICIAL;
+  posVerticalAtual = SERVO_VERTICAL_INICIAL;
+
+  Serial.println("[SERVO] Inicializados.");
+}
 
 void descartarFramesCamera(int quantidade) {
   for (int i = 0; i < quantidade; i++) {
@@ -170,9 +308,9 @@ camera_fb_t* capturarFoto() {
   return foto;
 }
 
-bool enviarFoto(camera_fb_t* foto) {
+String enviarFotoEAguardarClasse(camera_fb_t* foto) {
   if (!foto) {
-    return false;
+    return "";
   }
 
   conectarWiFi();
@@ -180,31 +318,39 @@ bool enviarFoto(camera_fb_t* foto) {
   HTTPClient http;
   http.begin(SERVIDOR_FOTOS_URL);
   http.addHeader("Content-Type", "image/jpeg");
-  http.setTimeout(10000);
+  http.setTimeout(TIMEOUT_RESPOSTA_SERVIDOR_MS);
 
-  Serial.printf("[HTTP] Enviando foto com %u bytes...\n", (unsigned int)foto->len);
+  Serial.printf("[HTTP] Enviando foto com %u bytes e aguardando classificacao...\n", (unsigned int)foto->len);
   int codigoHttp = http.POST(foto->buf, foto->len);
   String resposta = http.getString();
   http.end();
 
   if (codigoHttp == 200) {
-    Serial.printf("[HTTP] Foto salva pelo servidor: %s\n", resposta.c_str());
-    return true;
+    resposta = normalizarClasse(resposta);
+    Serial.printf("[HTTP] Classe recebida: %s\n", resposta.c_str());
+    return resposta;
   }
 
   Serial.printf("[HTTP] Falha no envio. Codigo: %d Resposta: %s\n", codigoHttp, resposta.c_str());
-  return false;
+  return "";
 }
 
 void tirarEEnviarFoto() {
   ultimaFotoMs = millis();
 
   camera_fb_t* foto = capturarFoto();
-  enviarFoto(foto);
+  String classe = enviarFotoEAguardarClasse(foto);
 
   if (foto) {
     esp_camera_fb_return(foto);
   }
+
+  if (classe.length() == 0) {
+    Serial.println("[HTTP] Nenhuma classe recebida dentro do tempo esperado.");
+    return;
+  }
+
+  moverConformeClasse(classe);
 }
 
 void setup() {
@@ -217,6 +363,7 @@ void setup() {
   digitalWrite(TRIG_PIN, LOW);
   digitalWrite(FLASH_LED_PIN, LOW);
 
+  iniciarServos();
   iniciarCamera();
   conectarWiFi();
 
