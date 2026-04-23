@@ -19,12 +19,12 @@
 #include <WiFi.h>
 
 // ===== Wi-Fi =====
-const char* WIFI_SSID = "Ximenes";
-const char* WIFI_PASSWORD = "ximenes1234";
+const char* WIFI_SSID = "Iensen";
+const char* WIFI_PASSWORD = "itonfo123";
 
 // Rode o servidor_fotos.py no computador e copie a URL exibida aqui.
 // Exemplo: http://192.168.0.25:5000/foto
-const char* SERVIDOR_FOTOS_URL = "http://172.16.225.61:5000/foto";
+const char* SERVIDOR_FOTOS_URL = "http://10.168.138.57:5000/foto";
 
 // ===== Sensor ultrassonico =====
 #define TRIG_PIN 14
@@ -35,6 +35,9 @@ const char* SERVIDOR_FOTOS_URL = "http://172.16.225.61:5000/foto";
 // ===== Camera / flash =====
 #define FLASH_LED_PIN 4
 #define TEMPO_FLASH_MS 180
+#define FRAMES_DESCARTE_INICIAL 3
+#define FRAMES_DESCARTE_ANTES_FOTO 3
+#define INTERVALO_DESCARTE_FRAME_MS 80
 
 // Evita tirar varias fotos seguidas do mesmo objeto parado.
 #define INTERVALO_MINIMO_FOTOS_MS 5000UL
@@ -58,6 +61,16 @@ const char* SERVIDOR_FOTOS_URL = "http://172.16.225.61:5000/foto";
 #define CAM_PIN_PCLK 22
 
 unsigned long ultimaFotoMs = 0;
+
+void descartarFramesCamera(int quantidade) {
+  for (int i = 0; i < quantidade; i++) {
+    camera_fb_t* frame = esp_camera_fb_get();
+    if (frame) {
+      esp_camera_fb_return(frame);
+    }
+    delay(INTERVALO_DESCARTE_FRAME_MS);
+  }
+}
 
 bool iniciarCamera() {
   camera_config_t config;
@@ -85,7 +98,7 @@ bool iniciarCamera() {
   if (psramFound()) {
     config.frame_size = FRAMESIZE_VGA;  // 640x480
     config.jpeg_quality = 12;
-    config.fb_count = 2;
+    config.fb_count = 1;
   } else {
     config.frame_size = FRAMESIZE_QVGA; // 320x240
     config.jpeg_quality = 14;
@@ -99,6 +112,7 @@ bool iniciarCamera() {
   }
 
   Serial.println("[CAMERA] Inicializada.");
+  descartarFramesCamera(FRAMES_DESCARTE_INICIAL);
   return true;
 }
 
@@ -138,14 +152,12 @@ float medirDistanciaCm() {
 }
 
 camera_fb_t* capturarFoto() {
-  // Descarta um frame antigo, se existir, para reduzir chance de enviar foto atrasada.
-  camera_fb_t* descarte = esp_camera_fb_get();
-  if (descarte) {
-    esp_camera_fb_return(descarte);
-  }
-
   digitalWrite(FLASH_LED_PIN, HIGH);
   delay(TEMPO_FLASH_MS);
+
+  // A camera pode entregar frames antigos. Estes descartes forcam a fila a andar
+  // antes de escolher a imagem que sera enviada ao computador.
+  descartarFramesCamera(FRAMES_DESCARTE_ANTES_FOTO);
 
   camera_fb_t* foto = esp_camera_fb_get();
 
@@ -185,15 +197,13 @@ bool enviarFoto(camera_fb_t* foto) {
 }
 
 void tirarEEnviarFoto() {
+  ultimaFotoMs = millis();
+
   camera_fb_t* foto = capturarFoto();
-  bool enviada = enviarFoto(foto);
+  enviarFoto(foto);
 
   if (foto) {
     esp_camera_fb_return(foto);
-  }
-
-  if (enviada) {
-    ultimaFotoMs = millis();
   }
 }
 
