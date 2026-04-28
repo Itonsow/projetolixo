@@ -22,12 +22,12 @@
 #include <WiFi.h>
 
 // ===== Wi-Fi =====
-const char* WIFI_SSID = "Iensen";
-const char* WIFI_PASSWORD = "itonfo123";
+const char* WIFI_SSID = "Ximenes";
+const char* WIFI_PASSWORD = "ximenes1234";
 
 // Rode o servidor_fotos.py no computador e copie a URL exibida aqui.
 // Exemplo: http://192.168.0.25:5000/foto
-const char* SERVIDOR_FOTOS_URL = "http://10.168.138.57:5000/foto";
+const char* SERVIDOR_FOTOS_URL = "http://172.20.10.4:5000/foto";
 
 // ===== Sensor ultrassonico =====
 #define TRIG_PIN 14
@@ -41,7 +41,7 @@ const char* SERVIDOR_FOTOS_URL = "http://10.168.138.57:5000/foto";
 
 // Preencha estes valores conforme a mecanica do seu projeto.
 #define SERVO_HORIZONTAL_INICIAL 0
-#define SERVO_VERTICAL_INICIAL 10
+#define SERVO_VERTICAL_INICIAL 90
 
 #define ANGULO_X_PLASTICO 0
 #define ANGULO_Y_PLASTICO 180
@@ -49,8 +49,8 @@ const char* SERVIDOR_FOTOS_URL = "http://10.168.138.57:5000/foto";
 #define ANGULO_X_METAL 90
 #define ANGULO_Y_METAL 180
 
-#define ANGULO_X_PAPEL 90
-#define ANGULO_Y_PAPEL 90
+#define ANGULO_X_PAPEL 0
+#define ANGULO_Y_PAPEL 0
 
 #define ANGULO_X_BIOLOGICO 90
 #define ANGULO_Y_BIOLOGICO 0

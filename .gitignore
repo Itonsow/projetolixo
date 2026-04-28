@@ -3,3 +3,5 @@ fotos/*.jpg
 fotos/*.jpeg
 venv
 *.pt
+results/*.jpg
+results/*.jpeg
