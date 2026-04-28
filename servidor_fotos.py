@@ -87,12 +87,13 @@ def classe_padrao(nome_classe: str) -> str:
 
     aliases = {
         "plastico": "plastico",
-        "plastic": "plastico",
+        "plastical": "plastico",
         "metal": "metal",
         "papel": "papel",
         "paper": "papel",
         "biologico": "biologico",
         "bio": "biologico",
+        "biological": "biologico",
         "organic": "biologico",
         "organico": "biologico",
     }

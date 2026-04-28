@@ -1,3 +1,7 @@
 # Fotos capturadas pelo ESP32-CAM (não versionar imagens)
 fotos/*.jpg
 fotos/*.jpeg
+venv
+*.pt
+results/*.jpg
+results/*.jpeg
