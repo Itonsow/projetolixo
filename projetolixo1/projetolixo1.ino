@@ -27,7 +27,7 @@ const char* WIFI_PASSWORD = "ximenes1234";
 
 // Rode o servidor_fotos.py no computador e copie a URL exibida aqui.
 // Exemplo: http://192.168.0.25:5000/foto
-const char* SERVIDOR_FOTOS_URL = "http://172.20.10.4:5000/foto";
+const char* SERVIDOR_FOTOS_URL = "http://172.20.10.8:5000/foto";
 
 // ===== Sensor ultrassonico =====
 #define TRIG_PIN 14
